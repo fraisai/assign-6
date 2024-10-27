@@ -103,49 +103,31 @@ resource "aws_route_table_association" "private" {
     - Ensure IAM roles are attached to allow instances to interact with other AWS services (S3, CloudWatch, etc.).
  ***************************/
 
+
 # Define AMI for instance
 data "aws_ami" "amazon-linux" {
   most_recent = true
   owners      = ["amazon"]
 }
 
-# Security Group for Load Balancer 
-resource "aws_security_group" "fariha_assign6_alb_sg" {
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  vpc_id = aws_vpc.fariha_vpc_assign6.id
-}
-
 # Security Group for ASG EC2 instances
  # Allows ingress HTTP traffic on port 80 and all outbound traffic. However, it restricts inbound traffic to requests coming from any source associated with the ALB security group, ensuring that only requests forwarded from my load balancer will reach your instances.
 resource "aws_security_group" "fariha_assign_instance" {
-  ingress {
-    from_port       = 80
-    to_port         = 80
-    protocol        = "tcp"
-    security_groups = [aws_security_group.fariha_assign6_alb_sg.id]
-  }
+    ingress {
+        from_port       = 80
+        to_port         = 80
+        protocol        = "tcp"
+        security_groups = [aws_security_group.fariha_assign6_alb_sg.id]
+    }
 
-  egress {
-    from_port       = 0
-    to_port         = 0
-    protocol        = "-1"
-    cidr_blocks     = ["0.0.0.0/0"]
-  }
+    egress {
+        from_port       = 0
+        to_port         = 0
+        protocol        = "-1"
+        cidr_blocks     = ["0.0.0.0/0"]
+    }
 
-  vpc_id = aws_vpc.fariha_vpc_assign6.id
+    vpc_id = aws_vpc.fariha_vpc_assign6.id
 }
 
 
@@ -166,6 +148,13 @@ resource "aws_launch_template" "fariha_assign6_lt" {
     vpc_security_group_ids = ["${aws_security_group.fariha_assign_instance.id}"]
         # allows ingress traffic on port 80 and egress traffic to all endpoints
 
+    block_device_mappings { # attach EBS Volume
+        device_name = "/dev/sdh" 
+        ebs {
+            volume_type    = "gp3"
+        }
+    }
+
     lifecycle { # lifecycle block = use to avoid unwanted scaling of your ASG
         create_before_destroy = true
             # Why use lifecyle block?
@@ -174,27 +163,34 @@ resource "aws_launch_template" "fariha_assign6_lt" {
     }
 }
 
+
+/***************************
+ * 1.4: AUTO HEALING
+    - Configure EC2 Auto Recovery to automatically replace unhealthy instances using a health check based on EC2 status checks and ELB health checks. 
+ ***************************/
+
 # ASG configuration
 resource "aws_autoscaling_group" "fariha_assign6_asg" {
-  min_size             = 2
-  max_size             = 3
-  desired_capacity     = 2
-  
-  launch_template { # Launch Template
-    id      = aws_launch_template.fariha_assign6_lt.id
-    version = "$Latest"
-  }
+    name = "fariha_assign6_asg"
+    min_size             = 2
+    max_size             = 3
+    desired_capacity     = 2
+    
+    launch_template { # Launch Template
+        id      = aws_launch_template.fariha_assign6_lt.id
+        version = "$Latest"
+    }
+    count = var.subnet_count.public
+    vpc_zone_identifier  = [aws_subnet.fariha_subnet_public[count.index].id]
+        # the subnets where the ASGs will launch new instances
 
-  vpc_zone_identifier  = aws_subnet.fariha_subnet_public
-    # the subnets where the ASGs will launch new instances
+    health_check_type    = "both" # performs ELB & EC2 instance check - 1.4
 
-  health_check_type    = "ELB"
-
-  tag {
-    key                 = "Name"
-    value               = "fariha_tf"
-    propagate_at_launch = true
-  }
+    tag {
+        key                 = "Name"
+        value               = "fariha_tf"
+        propagate_at_launch = true
+    }
 }
 
 
@@ -205,18 +201,37 @@ resource "aws_autoscaling_group" "fariha_assign6_asg" {
     - Implement a predictive scaling policy based on historical usage patterns to proactively adjust the number of instances.
  ***************************/
 
-
+resource "aws_autoscaling_policy" "fariha_asg_policy" {
+    autoscaling_group_name = "fariha_assign6_asg"
+    name = "predictive-policy"
+    policy_type            = "PredictiveScaling"
+    predictive_scaling_configuration {
+        metric_specification {
+        target_value = 10
+        customized_load_metric_specification {
+            metric_data_queries {
+            id         = "load_sum"
+            expression = "SUM(SEARCH('{AWS/EC2,AutoScalingGroupName} MetricName=\"CPUUtilization\" fariha_assign6_asg', 'Sum', 3600))"
+            }
+        }
+        }
+    }
+}
 
 /***************************
  * 1.3: MULTI-TIER APPLICATION DEPLOYMENT
     - Set up one tier for web servers and use a placement group for web tier instances for enhanced network performance. 
     - Set up another tier for the database layer
  ***************************/
+resource "aws_placement_group" "web_pg" {
+  name     = "fariha-pg-web"
+  strategy = "cluster"
+}
 
-/***************************
- * 1.4: AUTO HEALING
-    - Configure EC2 Auto Recovery to automatically replace unhealthy instances using a health check based on EC2 status checks and ELB health checks. 
- ***************************/
+resource "aws_placement_group" "db_pg" {
+  name     = "fariha-pg-db"
+  strategy = "cluster"
+}
 
 
 
@@ -240,6 +255,162 @@ resource "aws_autoscaling_group" "fariha_assign6_asg" {
 /***************************
  * ALB SETUP
  ***************************/
+
+# Security Group for Load Balancer 
+resource "aws_security_group" "fariha_assign6_alb_sg" {
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  vpc_id = aws_vpc.fariha_vpc_assign6.id
+}
+
+# Create an application load balancer
+resource "aws_lb" "assign6_alb" {
+  name               = "fariha-assign6-alb"
+  internal           = false
+  load_balancer_type = "application"
+  security_groups    = [aws_security_group.fariha_assign6_alb_sg.id]
+  subnets            = aws_subnet.fariha_subnet_public
+}
+
+# Specify how to handle any HTTP requests to port 80 = aka forward all requests to the load balancer to a target group. 
+/***************************
+  * resource "aws_lb_listener" "alb_listener" {
+    load_balancer_arn = aws_lb.assign6_alb.arn
+    port              = "80"
+    protocol          = "HTTP"
+
+    default_action {
+      type             = "forward"
+      target_group_arn = aws_lb_target_group.ec2_lb_tg.arn
+    }
+  }
+ ***************************/
+
+
+# forward all HTTP requests to the load balancer to HTTPS
+resource "aws_lb_listener" "http_listener" {
+  load_balancer_arn = aws_lb.assign6_alb.arn
+  port              = "80"
+  protocol          = "HTTP"
+
+  # Redirect HTTP to HTTPS
+  default_action {
+    type = "redirect"
+    redirect {
+      host        = "#{host}"
+      path        = "/"
+      port        = "443"
+      protocol    = "HTTPS"
+      query       = "#{query}"
+      status_code = "HTTP_301"
+    }
+  }
+}
+
+# Create HTTPS Listener
+resource "aws_lb_listener" "https_listener" {
+  load_balancer_arn = aws_lb.assign6_alb.arn
+  port = 443
+  protocol = "HTTPS"
+  ssl_policy        = "ELBSecurityPolicy-2016-11"  # ADJUST
+  certificate_arn = aws_acm_certificate.fariha_acm.arn
+
+  # Rules for path based routing - forward
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.ec2_lb_tg.arn
+  }
+}
+
+# Path-Based routing for /api to Lambda target group
+resource "aws_lb_listener_rule" "api_rule" {
+  listener_arn = aws_lb_listener.https_listener.arn
+  priority = 100
+
+  condition {
+    path_pattern {
+      values = ["/api/*"]
+    }
+  }
+
+  action {
+    type = "forward" 
+    target_group_arn = aws_lb_target_group.lambda_tg.arn
+  }
+}
+
+# Path-based routing for /app to EC2 target group
+resource "aws_lb_listener_rule" "app_rule" {
+  listener_arn = aws_lb_listener.https_listener.arn
+  priority     = 200 # Lower priority than the /api rule
+
+  condition {
+    path_pattern {
+      values = ["/app/*"]
+    }
+  }
+
+  action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.ec2_lb_tg.arn
+  }
+}
+
+
+
+# Target group configuration - defines the collection of instances our ALB will send traffic to (TF does not manage the configuration of the targets in that group directly, but instead specifies a list of destinations the load balancer can forward requests to).
+resource "aws_lb_target_group" "ec2_lb_tg" {
+  name     = "fariha-alb-target-group"
+  port     = 80
+  protocol = "HTTP"
+  vpc_id   = aws_vpc.fariha_vpc_assign6.id
+
+
+  # Enable sticky sessions
+  stickiness {
+    type            = "lb_cookie"
+    cookie_duration = 86400  # Set the session duration in seconds (1 day here)
+  }
+
+  # Advanced health check configuration
+  health_check {
+    healthy_threshold   = 3
+    unhealthy_threshold = 3
+    timeout             = 5
+    interval            = 10
+    path                = "/health"       # Specify your health check endpoint
+    matcher             = "200-299"       # Only accept response codes in this range
+  }
+}
+
+# Target Group for Lambda function
+resource "aws_lb_target_group" "lambda_tg" {
+  name = "fariha-lambda-tg"
+  port = 80
+  protocol = "HTTP"
+  vpc_id = aws_vpc.fariha_vpc_assign6.id
+}
+
+
+# aws_autoscaling_attachment resource links your ASG with the target group - allows AWS to automatically add/remove instances from the target group over their lifecycle.
+resource "aws_autoscaling_attachment" "asg_attach" {
+    for_each = toset([aws_autoscaling_group.fariha_assign6_asg])
+    autoscaling_group_name = each.key
+    lb_target_group_arn    = aws_lb_target_group.ec2_lb_tg.arn
+}
+
 
 
 
@@ -300,7 +471,7 @@ resource "aws_acm_certificate_validation" "cert_validation" {
  ***************************/
 
 /***************************
- * 3.1: EBS & DATA REPLICATION
+ * 3.1: EBS & DATA REPLICATION = look at aws launch template in block_device_mappings
     - Use Provisioned IOPS EBS volumes for the database layer
     - Use GP3 volumes for the web servers.
     - Implement EBS Snapshots for regular backups and integrate with AWS Backup for automated backup policies
@@ -318,6 +489,15 @@ resource "aws_acm_certificate_validation" "cert_validation" {
     - Implement S3 Storage Classes (e.g., Standard, Intelligent Tiering, Glacier) 
     - Design a lifecycle policy that transitions data to cost-effective storage tiers based on data access patterns
  ***************************/
+# S3 Bucket
+resource "aws_s3_bucket" "fariha_assign6_bucket" {
+    bucket = "fariha_assign6_bucket"
+    tags = {
+        Name        = "fariha-assign6"
+    }
+}
+
+
 
 
 /***************************
@@ -325,13 +505,196 @@ resource "aws_acm_certificate_validation" "cert_validation" {
     - Enable versioning for bucket to preserve data integrity
     - Enforce SSE-S3 or SSE-KMS encryption for all objects stored in the bucket
  ***************************/
+# Implement a lifecycle policy for the S3 bucket
+resource "aws_s3_bucket_lifecycle_configuration" "fariha_lifecycle" {
+  bucket = aws_s3_bucket.fariha_assign6_bucket.bucket
 
+  # Transition policy for Standard storage class (default)
+  rule {
+    id     = "Standard-to-IntelligentTiering"
+    status = "Enabled"
+
+    filter {
+      prefix = ""  # Apply to all objects
+    }
+
+    transition {
+      days          = 30
+      storage_class = "INTELLIGENT_TIERING"  # Transition to Intelligent Tiering after 30 days
+    }
+
+    expiration {
+      days = 3650  # Objects expire after 10 years
+    }
+  }
+
+  # Transition policy from Intelligent-Tiering to Glacier
+  rule {
+    id     = "IntelligentTiering-to-Glacier"
+    status = "Enabled"
+
+    filter {
+      prefix = ""  # Apply to all objects
+    }
+
+    transition {
+      days          = 90
+      storage_class = "GLACIER"  # Transition to Glacier after 90 days
+    }
+  }
+
+  # Transition from Glacier to Expiration (after 365 days in Glacier)
+  rule {
+    id     = "Glacier-to-Expiration"
+    status = "Enabled"
+
+    filter {
+      prefix = ""  # Apply to all objects
+    }
+
+    expiration {
+      days = 455  # Expire objects 455 days after creation (90 days in Intelligent Tiering + 365 days in Glacier)
+    }
+  }
+}
+
+# S3 Bucket Versioning
+resource "aws_s3_bucket_versioning" "s3_versioning" {
+  bucket = aws_s3_bucket.fariha_assign6_bucket.bucket
+
+  versioning_configuration {
+    status = "Enabled"  # Enable versioning for better data management
+  }
+}
+
+# S3 Bucket Server-Side Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "s3_encryption" {
+  bucket = aws_s3_bucket.fariha_assign6_bucket.bucket
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"  # Default server-side encryption (AES-256)
+    }
+  }
+}
 
 /***************************
  * 3.3: REPLICATION & STATIC WEBSITE HOSTING
     - CRR: Set up cross-region replication for S3 buckets across 2 different regions to ensure disaster recovery
     - STATIC WEBSITE HOSTING: Host a static version of your application's frontend on S3 
  ***************************/
+
+provider "aws" {
+  alias  = "destination"
+  region = "us-west-2"  # Destination bucket region
+}
+
+# Create destination S3 bucket in region us-west-2
+resource "aws_s3_bucket" "destination_bucket" {
+  provider = aws.destination
+  bucket   = "fariha-destination-bucket-assign6"
+
+  tags = {
+    Name        = "fariha-assign6"
+  }
+}
+
+# Create an IAM role for S3 replication
+resource "aws_iam_role" "replication_role" {
+  name = "fariha-s3-replication-role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action    = "sts:AssumeRole",
+        Effect    = "Allow",
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach a policy to allow replication between the source and destination buckets
+resource "aws_iam_role_policy" "replication_policy" {
+  role = aws_iam_role.replication_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action = [
+          "s3:GetObjectVersionForReplication",
+          "s3:GetObjectVersionAcl",
+          "s3:GetObjectVersionTagging",
+          "s3:ReplicateObject",
+          "s3:ReplicateDelete",
+          "s3:ReplicateTags"
+        ],
+        Effect   = "Allow",
+        Resource = "${aws_s3_bucket.fariha_assign6_bucket.arn}/*"
+      },
+      {
+        Action = "s3:ListBucket",
+        Effect = "Allow",
+        Resource = aws_s3_bucket.fariha_assign6_bucket.arn
+      },
+      {
+        Action = "s3:PutObject",
+        Effect = "Allow",
+        Resource = "${aws_s3_bucket.destination_bucket.arn}/*"
+      }
+    ]
+  })
+}
+
+# Create replication configuration in the source bucket
+resource "aws_s3_bucket_replication_configuration" "source_replication" {
+  bucket = aws_s3_bucket.fariha_assign6_bucket.id
+
+  role = aws_iam_role.replication_role.arn
+
+  rule {
+    id     = "ReplicationRule"
+    status = "Enabled"
+
+    filter {
+      prefix = ""  # Apply to all objects
+    }
+
+    destination {
+      bucket        = aws_s3_bucket.destination_bucket.arn
+      storage_class = "STANDARD"  # You can use different storage classes such as STANDARD, INTELLIGENT_TIERING, etc.
+    }
+  }
+}
+
+# Destination bucket policy to allow replication
+resource "aws_s3_bucket_policy" "destination_policy" {
+  provider = aws.destination
+  bucket   = aws_s3_bucket.destination_bucket.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect    = "Allow",
+        Principal = {
+          AWS = aws_iam_role.replication_role.arn
+        },
+        Action    = "s3:PutObject",
+        Resource  = "${aws_s3_bucket.destination_bucket.arn}/*",
+        Condition = {
+          StringEquals = {
+            "s3:x-amz-acl" = "bucket-owner-full-control"
+          }
+        }
+      }
+    ]
+  })
+}
 
 
 /***************************
@@ -345,6 +708,139 @@ resource "aws_acm_certificate_validation" "cert_validation" {
     - Set up custom cache invalidation to automatically clear cached objects during deployments
     - Implement geo-restrictions to control access based on user location
  ***************************/
+
+# IAM Role for CloudFront to access the S3 bucket
+resource "aws_iam_role" "cloudfront_access_role" {
+  name = "cloudfront-access-role"
+
+  assume_role_policy = jsonencode({
+    "Version" : "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {
+        "Service": "cloudfront.amazonaws.com"
+      },
+      "Action": "sts:AssumeRole"
+    }]
+  })
+}
+
+# Attach policy to allow CloudFront to read S3 objects
+resource "aws_iam_role_policy" "cloudfront_access_policy" {
+  name   = "cloudfront-access-policy"
+  role   = aws_iam_role.cloudfront_access_role.id
+
+  policy = jsonencode({
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Effect": "Allow",
+        "Action": [
+          "s3:GetObject"
+        ],
+        "Resource": [
+          "${aws_s3_bucket.fariha_assign6_bucket.arn}/*"
+        ]
+      }
+    ]
+  })
+}
+
+# Define CloudFront Distribution
+resource "aws_cloudfront_distribution" "cdn_distribution" {
+  origin {
+    domain_name = aws_s3_bucket.fariha_assign6_bucket.bucket_regional_domain_name
+    origin_id   = "s3-origin"
+
+    s3_origin_config {
+      origin_access_identity = aws_cloudfront_origin_access_identity.origin_identity.cloudfront_access_identity_path
+    }
+  }
+
+  enabled             = true
+  default_root_object = "index.html"
+
+  # Custom cache behavior
+  default_cache_behavior {
+    target_origin_id       = "s3-origin"
+    viewer_protocol_policy = "redirect-to-https"
+    allowed_methods        = ["GET", "HEAD", "OPTIONS"]
+    cached_methods         = ["GET", "HEAD"]
+
+    # Set cache policy to manage cache invalidation
+    cache_policy_id = aws_cloudfront_cache_policy.custom_cache_policy.id
+
+    forwarded_values {
+      query_string = true
+      headers      = ["Origin"]
+      cookies {
+        forward = "none"
+      }
+
+    }
+
+    # Custom TTL settings
+    min_ttl                = 0
+    default_ttl            = 86400  # 1 day in seconds
+    max_ttl                = 31536000  # 1 year in seconds
+  }
+
+  # Geo-restrictions for content access
+  restrictions {
+    geo_restriction {
+      restriction_type = "whitelist"  # or "blacklist" to restrict access to specific countries
+      locations        = ["US", "CA", "GB"]  # Example: Allow access only to these countries
+    }
+  }
+
+  # Price class for low-latency delivery
+  price_class = "PriceClass_All"  # Use all edge locations globally
+
+  # Logging (optional)
+  logging_config {
+    bucket = "my-logging-bucket.s3.amazonaws.com"  # Set up a logging bucket if required
+  }
+
+  # SSL configuration for HTTPS delivery
+  viewer_certificate {
+    cloudfront_default_certificate = true
+  }
+}
+
+# Origin Access Identity (OAI) to grant CloudFront access to private S3 objects
+resource "aws_cloudfront_origin_access_identity" "origin_identity" {
+  comment = "OAI for S3 bucket"
+}
+
+# Custom Cache Policy for Cache Invalidation
+resource "aws_cloudfront_cache_policy" "custom_cache_policy" {
+  name    = "custom-cache-policy"
+  comment = "Custom cache policy for deployment invalidation"
+
+  default_ttl = 86400  # 1 day
+  min_ttl     = 0
+  max_ttl     = 31536000  # 1 year
+
+  parameters_in_cache_key_and_forwarded_to_origin {
+    enable_accept_encoding_brotli = true
+    enable_accept_encoding_gzip   = true
+
+    headers_config {
+      header_behavior = "whitelist"
+      headers {
+        items = ["Origin"]
+      }
+    }
+
+    cookies_config {
+      cookie_behavior = "all"
+    }
+
+    query_strings_config {
+      query_string_behavior = "all"
+    }
+  }
+}
 
 
 
@@ -369,6 +865,137 @@ resource "aws_acm_certificate_validation" "cert_validation" {
     - 
  ***************************/
 
+# Create a Lambda Function
+resource "aws_lambda_function" "api_handler" {
+  function_name = "apiHandler"
+  runtime       = "nodejs20.x" # or your preferred runtime
+  handler       = "index.handler" # Assuming your handler is in index.js
+
+  # Replace with your code or point to a ZIP file
+  s3_bucket = "your-s3-bucket" # S3 bucket for your Lambda code
+  s3_key    = "lambda/api_handler.zip" # S3 key for your Lambda code
+
+  environment {
+    variables = {
+      DYNAMODB_TABLE = aws_dynamodb_table.users.name
+    }
+  }
+
+  role = aws_iam_role.lambda_exec.arn
+}
+
+# IAM Role for Lambda Execution
+resource "aws_iam_role" "lambda_exec" {
+  name = "lambda_exec_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+      Effect    = "Allow"
+      Sid       = ""
+    }]
+  })
+}
+
+# Attach Permissions to Lambda Role
+resource "aws_iam_policy_attachment" "lambda_dynamodb" {
+  name       = "lambda_dynamodb"
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaDynamoDBExecutionRole"
+  roles      = [aws_iam_role.lambda_exec.name]
+}
+
+# Create a Cognito User Pool
+resource "aws_cognito_user_pool" "user_pool" {
+  name = "user_pool"
+
+  lambda_config {
+    pre_sign_up = aws_lambda_function.api_handler.arn
+  }
+
+  username_attributes = ["email"]
+
+  verification_message_template {
+    default_email_option = "CONFIRM_WITH_LINK"
+    email_message        = "Click the link to confirm your email: {####}"
+    email_subject        = "Verify your email address"
+  }
+}
+
+# Create a Cognito User Pool Client
+resource "aws_cognito_user_pool_client" "user_pool_client" {
+  name         = "user_pool_client"
+  user_pool_id = aws_cognito_user_pool.user_pool.id
+  generate_secret = false
+}
+
+# Create an API Gateway
+resource "aws_api_gateway_rest_api" "api" {
+  name        = "my_api"
+  description = "My API Gateway"
+}
+
+# Create a Resource for the API
+resource "aws_api_gateway_resource" "users" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  parent_id   = aws_api_gateway_rest_api.api.root_resource_id
+  path_part   = "users"
+}
+
+# Create a Method for the Resource
+resource "aws_api_gateway_method" "post_user" {
+  rest_api_id   = aws_api_gateway_rest_api.api.id
+  resource_id   = aws_api_gateway_resource.users.id
+  http_method   = "POST"
+  authorization = "COGNITO_USER_POOLS"
+
+  authorizer_id = aws_api_gateway_authorizer.cognito_authorizer.id
+}
+
+# Create an API Gateway Authorizer for Cognito
+resource "aws_api_gateway_authorizer" "cognito_authorizer" {
+  name               = "cognito_authorizer"
+  rest_api_id       = aws_api_gateway_rest_api.api.id
+  authorizer_uri    = "arn:aws:apigateway:${var.region}:cognito-idp:/${aws_cognito_user_pool.user_pool.id}/authorizer"
+  identity_source    = "method.request.header.Authorization"
+  provider_arns      = [aws_cognito_user_pool.user_pool.arn]
+  type               = "COGNITO_USER_POOLS"
+}
+
+# Create a Lambda Integration
+resource "aws_api_gateway_integration" "lambda_integration" {
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  resource_id = aws_api_gateway_resource.users.id
+  http_method = aws_api_gateway_method.post_user.http_method
+
+  integration_http_method = "POST"
+  type                    = "AWS_PROXY"
+  uri                     = aws_lambda_function.api_handler.invoke_arn
+}
+
+# Deploy the API
+resource "aws_api_gateway_deployment" "api_deployment" {
+  depends_on = [aws_api_gateway_integration.lambda_integration]
+  rest_api_id = aws_api_gateway_rest_api.api.id
+  stage_name  = "prod" # Change as needed
+}
+
+# Outputs
+output "api_url" {
+  value = "${aws_api_gateway_deployment.api_deployment.invoke_url}/users"
+}
+
+output "user_pool_id" {
+  value = aws_cognito_user_pool.user_pool.id
+}
+
+output "user_pool_client_id" {
+  value = aws_cognito_user_pool_client.user_pool_client.id
+}
+
  
 /***************************
  * 6.2: 
@@ -389,11 +1016,166 @@ resource "aws_acm_certificate_validation" "cert_validation" {
  * 7.1: 
     - 
  ***************************/
+# Create SNS Topic for Alerts
+resource "aws_sns_topic" "upload_complete_topic" {
+  name = "fariha-complete-topic"
+}
+
+# Create SQS Queue to subscribe to SNS Topic
+resource "aws_sqs_queue" "uploads_sqs_queue" {
+  name = "fariha-completed-queue"
+}
+
+# Subscribe SQS Queue to SNS Topic
+resource "aws_sns_topic_subscription" "sqs_subscription" {
+  topic_arn = aws_sns_topic.upload_complete_topic.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.uploads_sqs_queue.arn
+
+  # Allow SNS to send messages to SQS
+  depends_on = [aws_sqs_queue_policy.sqs_policy]
+}
+
+# SNS Policy to Allow SNS to Publish to SQS
+resource "aws_sqs_queue_policy" "sqs_policy" {
+  queue_url = aws_sqs_queue.uploads_sqs_queue.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Principal = {
+          Service = "sns.amazonaws.com"
+        },
+        Action = "sqs:SendMessage",
+        Resource = aws_sqs_queue.uploads_sqs_queue.arn,
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = aws_sns_topic.upload_complete_topic.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+
+# Subscribe Email to SNS Topic
+resource "aws_sns_topic_subscription" "email_subscription" {
+  topic_arn = aws_sns_topic.upload_complete_topic.arn
+  protocol  = "email"
+  endpoint  = "Fariha.Iftekher.tc@techconsulting.tech"
+}
 
 /***************************
  * 7.2: 
     - 
  ***************************/
+
+# Create Lambda Function to process uploads and publish to SNS
+resource "aws_lambda_function" "process_uploads_lambda" {
+  filename         = "lambda_function.zip"  # Path to your Lambda deployment package
+  function_name    = "process_uploads_function"
+  role             = aws_iam_role.lambda_exec_role.arn
+  handler          = "index.handler"
+  runtime          = "nodejs14.x"  # Example with Node.js
+  source_code_hash = filebase64sha256("lambda_function.zip")
+
+  environment {
+    variables = {
+      SNS_TOPIC_ARN = aws_sns_topic.upload_complete_topic.arn
+    }
+  }
+
+  tags = {
+    Name = "ProcessUploadsLambda"
+  }
+}
+
+# Add Lambda Permission to S3 Bucket for Invocation
+resource "aws_lambda_permission" "s3_invoke_lambda" {
+  statement_id  = "AllowS3Invocation"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.process_uploads_lambda.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.fariha_assign6_bucket.arn
+}
+
+# S3 Bucket Notification for Lambda Invocation on Object Creation
+resource "aws_s3_bucket_notification" "s3_to_lambda" {
+  bucket = aws_s3_bucket.fariha_assign6_bucket.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.process_uploads_lambda.arn
+    events              = ["s3:ObjectCreated:*"]
+  }
+
+  depends_on = [aws_lambda_permission.s3_invoke_lambda]
+}
+
+# Create Lambda to Subscribe to SNS Topic
+resource "aws_lambda_function" "sns_subscriber_lambda" {
+  filename         = "sns_subscriber_lambda.zip"  # Path to your subscriber Lambda deployment package
+  function_name    = "sns_subscriber_function"
+  role             = aws_iam_role.lambda_exec_role.arn
+  handler          = "index.handler"
+  runtime          = "nodejs14.x"
+  source_code_hash = filebase64sha256("sns_subscriber_lambda.zip")
+
+  tags = {
+    Name = "SnsSubscriberLambda"
+  }
+}
+
+# Subscribe Lambda to SNS Topic
+resource "aws_sns_topic_subscription" "lambda_subscription" {
+  topic_arn = aws_sns_topic.upload_complete_topic.arn
+  protocol  = "lambda"
+  endpoint  = aws_lambda_function.sns_subscriber_lambda.arn
+}
+
+# Lambda Execution Role with SNS and S3 Permissions
+resource "aws_iam_role" "lambda_exec_role" {
+  name = "lambda_exec_role"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Action    = "sts:AssumeRole",
+        Effect    = "Allow",
+        Principal = {
+          Service = "lambda.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+# Attach policies to allow Lambda to work with SNS and S3
+resource "aws_iam_role_policy" "lambda_policy" {
+  role = aws_iam_role.lambda_exec_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "s3:GetObject",
+          "s3:ListBucket",
+          "sns:Publish"
+        ],
+        Resource = [
+          aws_s3_bucket.fariha_assign6_bucket.arn,
+          "${aws_s3_bucket.fariha_assign6_bucket.arn}/*",
+          aws_sns_topic.upload_complete_topic.arn
+        ]
+      }
+    ]
+  })
+}
 
 
 /***************************

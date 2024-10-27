@@ -41,6 +41,6 @@ variable "allocate_id" {
 
 
 variable "f_ip" {
-    sensitive               = true
     type                    = string
+    default                 = "172.21.186.195"
 }
