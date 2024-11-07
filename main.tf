@@ -6,13 +6,13 @@ data "aws_availability_zones" "available" {
 
 
 resource "aws_vpc" "fariha_vpc_assign6" {
-    cidr_block = var.vpc_cidr
-    enable_dns_hostnames = true
-    enable_dns_support   = true
+  cidr_block = var.vpc_cidr
+  enable_dns_hostnames = true
+  enable_dns_support   = true
 
-    tags = {
-        Name = "fariha-vpc-assign6"
-    }
+  tags = {
+      Name = "fariha-vpc-assign6"
+  }
 }
 
 # Create & attach IGW to VPC
@@ -47,10 +47,10 @@ resource "aws_subnet" "fariha_subnet_private" {
 
 # Create 1 NAT Gateway per AZ
 resource "aws_nat_gateway" "assign6_nat" {
-    depends_on = [aws_internet_gateway.fariha_assign6_igw]
-    count = var.subnet_count.public
-    subnet_id = aws_subnet.fariha_subnet_public[count.index].id
-    allocation_id = var.allocate_id
+  depends_on = [aws_internet_gateway.fariha_assign6_igw]
+  count = var.subnet_count.public
+  subnet_id = aws_subnet.fariha_subnet_public[count.index].id
+  allocation_id = var.allocate_id
 }
 
 
@@ -864,6 +864,24 @@ resource "aws_cloudfront_cache_policy" "custom_cache_policy" {
  * 6.1: 
     - 
  ***************************/
+# Part 3: DynamoDB Table for data storage
+resource "aws_dynamodb_table" "users" {
+  name         = "api-data-table"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "id"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+}
+
+
+data "archive_file" "zip_the_js_code" {
+  type        = "zip"
+  source_dir  = "${path.module}/lambda-functions/apiHandler/"
+  output_path = "${path.module}/lambda-functions/apiHandler.zip"
+}
 
 # Create a Lambda Function
 resource "aws_lambda_function" "api_handler" {
@@ -873,7 +891,7 @@ resource "aws_lambda_function" "api_handler" {
 
   # Replace with your code or point to a ZIP file
   s3_bucket = "your-s3-bucket" # S3 bucket for your Lambda code
-  s3_key    = "lambda/api_handler.zip" # S3 key for your Lambda code
+  s3_key    = "lambda-functions/api_handler.zip" # S3 key for your Lambda code
 
   environment {
     variables = {
@@ -1073,14 +1091,29 @@ resource "aws_sns_topic_subscription" "email_subscription" {
     - 
  ***************************/
 
+resource "local_file" "lambda_js_code" {
+  content  = file("./lambda-functions/publishUploadsToSns/index.js")
+  filename = "./lambda-functions/publishUploadsToSns/index.js"
+}
+
+
+data "archive_file" "zip_sns_lambda_code" {
+  type        = "zip"
+  source_dir  = "./lambda-functions/publishUploadsToSns/index.js"
+  output_path = "./lambda-functions/publishUploadsToSns.zip"
+  depends_on=[local_file.lambda_js_code]
+
+}
+
+
 # Create Lambda Function to process uploads and publish to SNS
 resource "aws_lambda_function" "process_uploads_lambda" {
-  filename         = "lambda_function.zip"  # Path to your Lambda deployment package
-  function_name    = "process_uploads_function"
+  filename         = data.archive_file.zip_sns_lambda_code.output_path
+  function_name    = "Publish_Uploads_Lambda"
   role             = aws_iam_role.lambda_exec_role.arn
   handler          = "index.handler"
-  runtime          = "nodejs14.x"  # Example with Node.js
-  source_code_hash = filebase64sha256("lambda_function.zip")
+  runtime          = "nodejs20.x"  # Example with Node.js
+  source_code_hash = filebase64sha256("lambda-functions/publishUploadsToSns.zip")
 
   environment {
     variables = {
@@ -1114,9 +1147,16 @@ resource "aws_s3_bucket_notification" "s3_to_lambda" {
   depends_on = [aws_lambda_permission.s3_invoke_lambda]
 }
 
+
+data "archive_file" "zip_subscribe_sns_lambda" {
+  type        = "zip"
+  source_dir  = "./lambda-functions/subscribeSns/index.js"
+  output_path = "./lambda-functions/subscribeSns.zip"
+}
+
 # Create Lambda to Subscribe to SNS Topic
 resource "aws_lambda_function" "sns_subscriber_lambda" {
-  filename         = "sns_subscriber_lambda.zip"  # Path to your subscriber Lambda deployment package
+  filename         = data.archive_file.zip_sns_lambda_code.output_path
   function_name    = "sns_subscriber_function"
   role             = aws_iam_role.lambda_exec_role.arn
   handler          = "index.handler"

@@ -44,3 +44,13 @@ variable "f_ip" {
     type                    = string
     default                 = "172.21.186.195"
 }
+
+variable "cpu_threshold" {
+  default = 70
+}
+variable "memory_threshold" {
+  default = 80
+}
+variable "latency_threshold" {
+  default = 300  # in milliseconds
+}
